@@ -4,6 +4,6 @@
   "description": "Service de recherche de livres par ISBN pour Librissime",
   "main": "api/lookup.js",
   "engines": {
-    "node": "18.x"
+    "node": "24.x"
   }
 }
