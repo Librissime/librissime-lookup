@@ -1,0 +1,9 @@
+{
+  "name": "librissime-lookup",
+  "version": "1.0.0",
+  "description": "Service de recherche de livres par ISBN pour Librissime",
+  "main": "api/lookup.js",
+  "engines": {
+    "node": "18.x"
+  }
+}
