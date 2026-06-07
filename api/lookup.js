@@ -39,7 +39,9 @@ async function searchISBNdb(isbn) {
       year: book.date_published ? book.date_published.substring(0, 4) : null,
       publisher: book.publisher || null,
       price: book.msrp ? parseFloat(book.msrp) : null,
-      language: book.language || null
+      language: book.language || null,
+      subjects: book.subjects || [],
+      binding: book.binding || null
     };
   } catch(e) {
     console.error('ISBNdb error:', e.message);
@@ -62,7 +64,9 @@ async function searchOpenLibrary(isbn) {
       author: book.authors ? book.authors.map(a => a.name).join(', ') : null,
       year: book.publish_date ? book.publish_date.slice(-4) : null,
       publisher: book.publishers ? book.publishers.map(p => p.name).join(', ') : null,
-      price: null
+      price: null,
+      subjects: book.subjects ? book.subjects.map(s => s.name || s) : [],
+      binding: null
     };
   } catch(e) {
     console.error('Open Library error:', e.message);
