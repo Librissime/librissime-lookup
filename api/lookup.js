@@ -20,7 +20,7 @@ function fetchUrl(url, headers = {}) {
       }
       let data = '';
       res.on('data', chunk => data += chunk);
-      res.on('end', () => resolve({ status: res.statusCode, body: data }));
+      res.on('end', () => resolve({ status: res.statusCode, body: data, finalUrl: url }));
     });
     req.on('error', reject);
     req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
@@ -47,7 +47,6 @@ async function searchISBNdb(isbn) {
       binding: book.binding || null
     };
   } catch(e) {
-    console.error('ISBNdb error:', e.message);
     return null;
   }
 }
@@ -66,33 +65,44 @@ async function getPriceGoogleBooks(isbn) {
     if (price && price > 2 && price < 200) return price;
     return null;
   } catch(e) {
-    console.error('Google Books error:', e.message);
     return null;
   }
 }
 
-async function getLesLibrairesHtml(isbn) {
-  try {
-    const res = await fetchUrl(`https://www.leslibraires.ca/recherche/?s=${isbn}`);
-    return { status: res.status, html: res.body };
-  } catch(e) {
-    return { status: 0, html: '', error: e.message };
+// Extraction du prix sur une page produit leslibraires.ca
+function extractPriceLL(html, isbn) {
+  // Le prix régulier est dans : <div class="price price--reg"><span><span class="text-nowrap">29,95 $</span>
+  const m = html.match(/price\s+price--reg[^>]*>\s*<span[^>]*>\s*<span[^>]*class="text-nowrap"[^>]*>\s*(\d+[,\.]\d{2})\s*\$/i);
+  if (m) {
+    const price = parseFloat(m[1].replace(',', '.'));
+    if (price > 2 && price < 200) return price;
   }
-}
-
-function extractPriceFromHtml(html) {
-  const patterns = [
-    /itemprop="price"[^>]*content="(\d+[\.,]\d{2})"/i,
-    /"price"\s*:\s*"?(\d+[\.,]\d{2})"?/i,
-    /class="[^"]*(?:price|prix)[^"]*"[^>]*>[^0-9]*(\d+[,\.]\d{2})\s*\$/i,
-    /(\d{1,3}[,\.]\d{2})\s*\$/
-  ];
-  for (const p of patterns) {
-    const m = html.match(p);
-    if (m) {
-      const price = parseFloat(m[1].replace(',', '.'));
+  // Fallback : prix proche de l'ISBN dans le HTML
+  const idx = html.indexOf(isbn);
+  if (idx > -1) {
+    const zone = html.substring(idx, idx + 2000);
+    const m2 = zone.match(/text-nowrap[^>]*>\s*(\d+[,\.]\d{2})\s*\$/i);
+    if (m2) {
+      const price = parseFloat(m2[1].replace(',', '.'));
       if (price > 2 && price < 200) return price;
     }
+  }
+  return null;
+}
+
+async function getPriceLesLibraires(isbn) {
+  const urls = [
+    `https://www.leslibraires.ca/livres/${isbn}`,
+    `https://www.leslibraires.ca/recherche?q=${isbn}`
+  ];
+  for (const url of urls) {
+    try {
+      const res = await fetchUrl(url);
+      if (res.status === 200 && res.body.includes(isbn)) {
+        const price = extractPriceLL(res.body, isbn);
+        if (price) return price;
+      }
+    } catch(e) { /* essayer l'URL suivante */ }
   }
   return null;
 }
@@ -131,37 +141,34 @@ module.exports = async (req, res) => {
   if (!isbn) return res.status(400).json({ error: 'ISBN requis' });
   const isbnClean = isbn.replace(/[-\s]/g, '');
 
-  // MODE DEBUG : HTML brut de leslibraires.ca
-  if (debug === 'll') {
-    const ll = await getLesLibrairesHtml(isbnClean);
-    return res.status(200).json({
-      statusLL: ll.status,
-      erreur: ll.error || null,
-      tailleHtml: ll.html.length,
-      extraitDebut: ll.html.substring(0, 1500),
-      extraitPrix: (() => {
-        const idx = ll.html.search(/\d{1,3}[,\.]\d{2}\s*\$/);
-        if (idx === -1) return 'AUCUN MOTIF DE PRIX TROUVÉ';
-        return ll.html.substring(Math.max(0, idx - 800), idx + 400);
-      })()
-    });
-  }
-
-  // MODE DEBUG : réponse brute de Google Books CA
-  if (debug === 'gb') {
-    try {
-      const r = await fetchUrl(`https://www.googleapis.com/books/v1/volumes?q=isbn:${isbnClean}&country=CA`);
-      return res.status(200).json({ statusGB: r.status, reponse: r.body.substring(0, 3000) });
-    } catch(e) {
-      return res.status(200).json({ statusGB: 0, erreur: e.message });
+  // MODE DEBUG : tester plusieurs formats d'adresses leslibraires.ca
+  if (debug === 'find') {
+    const candidates = [
+      `https://www.leslibraires.ca/livres/${isbnClean}`,
+      `https://www.leslibraires.ca/livres/-${isbnClean}`,
+      `https://www.leslibraires.ca/recherche?q=${isbnClean}`,
+      `https://www.leslibraires.ca/recherche/?q=${isbnClean}`,
+      `https://www.leslibraires.ca/catalogue?q=${isbnClean}`
+    ];
+    const results = [];
+    for (const url of candidates) {
+      try {
+        const r = await fetchUrl(url);
+        const hasIsbn = r.body.includes(isbnClean);
+        const price = hasIsbn ? extractPriceLL(r.body, isbnClean) : null;
+        results.push({ url, status: r.status, taille: r.body.length, contientISBN: hasIsbn, prixTrouve: price });
+      } catch(e) {
+        results.push({ url, erreur: e.message });
+      }
     }
+    return res.status(200).json(results);
   }
 
-  const [isbndb, openLib, priceGB, llResult] = await Promise.all([
+  const [isbndb, openLib, priceGB, priceLL] = await Promise.all([
     searchISBNdb(isbnClean),
     searchOpenLibrary(isbnClean),
     getPriceGoogleBooks(isbnClean),
-    getLesLibrairesHtml(isbnClean)
+    getPriceLesLibraires(isbnClean)
   ]);
 
   const bookInfo = isbndb || openLib;
@@ -169,7 +176,6 @@ module.exports = async (req, res) => {
     return res.status(404).json({ error: 'Livre non trouve', isbn: isbnClean });
   }
 
-  const priceLL = llResult.html ? extractPriceFromHtml(llResult.html) : null;
   const price = priceLL || priceGB || null;
   bookInfo.price = price;
   bookInfo.priceSource = priceLL ? 'leslibraires.ca' : (priceGB ? 'Google Books CA' : null);
