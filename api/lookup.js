@@ -1,21 +1,21 @@
 const https = require('https');
-const http = require('http');
 
 function fetchUrl(url, headers = {}) {
   return new Promise((resolve, reject) => {
-    const client = url.startsWith('https') ? https : http;
-    const options = {
+    const req = https.get(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8',
         'Accept-Language': 'fr-CA,fr;q=0.9,en;q=0.8',
         ...headers
       },
       timeout: 10000
-    };
-    const req = client.get(url, options, (res) => {
+    }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        fetchUrl(res.headers.location, headers).then(resolve).catch(reject);
+        const next = res.headers.location.startsWith('http')
+          ? res.headers.location
+          : new URL(res.headers.location, url).href;
+        fetchUrl(next, headers).then(resolve).catch(reject);
         return;
       }
       let data = '';
@@ -29,8 +29,7 @@ function fetchUrl(url, headers = {}) {
 
 async function searchISBNdb(isbn) {
   try {
-    const url = `https://api2.isbndb.com/book/${isbn}`;
-    const res = await fetchUrl(url, {
+    const res = await fetchUrl(`https://api2.isbndb.com/book/${isbn}`, {
       'Authorization': '69645_d3478ec48c157a1a8df7c275e9306418'
     });
     if (res.status !== 200) return null;
@@ -53,77 +52,62 @@ async function searchISBNdb(isbn) {
   }
 }
 
-async function getPriceRenaudBray(isbn) {
+// Prix via Google Books (CA) — listPrice/retailPrice en CAD quand disponible
+async function getPriceGoogleBooks(isbn) {
   try {
-    const url = `https://www.renaud-bray.com/Recherche.aspx?Categorie=1&Recherche=${isbn}`;
-    const res = await fetchUrl(url);
+    const res = await fetchUrl(`https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}&country=CA`);
     if (res.status !== 200) return null;
-    const html = res.body;
-    const pricePatterns = [
-      /class="[^"]*price[^"]*"[^>]*>\s*(\d+[,\.]\d{2})\s*\$/i,
-      /class="[^"]*prix[^"]*"[^>]*>\s*(\d+[,\.]\d{2})\s*\$/i,
-      /itemprop="price"[^>]*content="(\d+[\.,]\d{2})"/i,
-      /(\d+[,\.]\d{2})\s*\$\s*CA/i,
-      /prix[^>]*>\s*(\d+[,\.]\d{2})\s*\$/i,
-      /"price":\s*"?(\d+[\.,]\d{2})"?/i,
-      /(\d{1,3}[,\.]\d{2})\s*\$/,
-    ];
-    for (const pattern of pricePatterns) {
-      const match = html.match(pattern);
-      if (match) {
-        const price = parseFloat(match[1].replace(',', '.'));
-        if (price > 2 && price < 200) {
-          console.log('Renaud-Bray price found:', price);
-          return price;
-        }
-      }
+    const data = JSON.parse(res.body);
+    if (!data.items || !data.items.length) return null;
+    const sale = data.items[0].saleInfo;
+    if (!sale) return null;
+    let price = null;
+    if (sale.listPrice && sale.listPrice.currencyCode === 'CAD') price = sale.listPrice.amount;
+    else if (sale.retailPrice && sale.retailPrice.currencyCode === 'CAD') price = sale.retailPrice.amount;
+    if (price && price > 2 && price < 200) {
+      console.log('Google Books CA price:', price);
+      return price;
     }
     return null;
   } catch(e) {
-    console.error('Renaud-Bray error:', e.message);
+    console.error('Google Books error:', e.message);
     return null;
   }
 }
 
-async function getPriceLesLibraires(isbn) {
+async function getRenaudBrayHtml(isbn) {
   try {
-    const searchUrl = `https://www.leslibraires.ca/recherche/?s=${isbn}`;
-    const res = await fetchUrl(searchUrl);
-    if (res.status !== 200) return null;
-    const html = res.body;
-    const pricePatterns = [
-      /itemprop="price"[^>]*content="(\d+[\.,]\d{2})"/i,
-      /class="[^"]*price[^"]*"[^>]*>\s*(\d+[,\.]\d{2})\s*\$/i,
-      /class="[^"]*prix[^"]*"[^>]*>\s*(\d+[,\.]\d{2})\s*\$/i,
-      /"price":\s*"?(\d+[\.,]\d{2})"?/i,
-      /(\d{1,3}[,\.]\d{2})\s*\$\s/,
-    ];
-    for (const pattern of pricePatterns) {
-      const match = html.match(pattern);
-      if (match) {
-        const price = parseFloat(match[1].replace(',', '.'));
-        if (price > 2 && price < 200) {
-          console.log('leslibraires.ca price found:', price);
-          return price;
-        }
-      }
-    }
-    return null;
+    const res = await fetchUrl(`https://www.renaud-bray.com/Recherche.aspx?Categorie=1&Recherche=${isbn}`);
+    return { status: res.status, html: res.body };
   } catch(e) {
-    console.error('leslibraires.ca error:', e.message);
-    return null;
+    return { status: 0, html: '', error: e.message };
   }
+}
+
+function extractPriceFromHtml(html) {
+  const patterns = [
+    /itemprop="price"[^>]*content="(\d+[\.,]\d{2})"/i,
+    /"price"\s*:\s*"?(\d+[\.,]\d{2})"?/i,
+    /class="[^"]*(?:price|prix)[^"]*"[^>]*>[^0-9]*(\d+[,\.]\d{2})\s*\$/i,
+    /(\d{1,3}[,\.]\d{2})\s*\$/
+  ];
+  for (const p of patterns) {
+    const m = html.match(p);
+    if (m) {
+      const price = parseFloat(m[1].replace(',', '.'));
+      if (price > 2 && price < 200) return price;
+    }
+  }
+  return null;
 }
 
 async function searchOpenLibrary(isbn) {
   try {
-    const url = `https://openlibrary.org/api/books?bibkeys=ISBN:${isbn}&format=json&jscmd=data`;
-    const res = await fetchUrl(url);
+    const res = await fetchUrl(`https://openlibrary.org/api/books?bibkeys=ISBN:${isbn}&format=json&jscmd=data`);
     if (res.status !== 200) return null;
     const data = JSON.parse(res.body);
-    const key = `ISBN:${isbn}`;
-    if (!data[key]) return null;
-    const book = data[key];
+    const book = data[`ISBN:${isbn}`];
+    if (!book) return null;
     return {
       source: 'Open Library',
       title: book.title || null,
@@ -134,7 +118,6 @@ async function searchOpenLibrary(isbn) {
       binding: null
     };
   } catch(e) {
-    console.error('Open Library error:', e.message);
     return null;
   }
 }
@@ -148,17 +131,31 @@ module.exports = async (req, res) => {
   }
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
-  const { isbn } = req.query;
+  const { isbn, debug } = req.query;
   if (!isbn) return res.status(400).json({ error: 'ISBN requis' });
   const isbnClean = isbn.replace(/[-\s]/g, '');
-  console.log(`Recherche ISBN: ${isbnClean}`);
 
-  // Get book info from ISBNdb, price from Canadian sources
-  const [isbndb, openLib, priceRB, priceLL] = await Promise.all([
+  // MODE DEBUG : retourne le HTML brut de Renaud-Bray pour diagnostic
+  if (debug === 'rb') {
+    const rb = await getRenaudBrayHtml(isbnClean);
+    return res.status(200).json({
+      statusRB: rb.status,
+      erreur: rb.error || null,
+      tailleHtml: rb.html.length,
+      extraitDebut: rb.html.substring(0, 2000),
+      extraitPrix: (() => {
+        const idx = rb.html.search(/\d{1,3}[,\.]\d{2}\s*\$/);
+        if (idx === -1) return 'AUCUN MOTIF DE PRIX TROUVÉ';
+        return rb.html.substring(Math.max(0, idx - 800), idx + 400);
+      })()
+    });
+  }
+
+  const [isbndb, openLib, priceGB, rbResult] = await Promise.all([
     searchISBNdb(isbnClean),
     searchOpenLibrary(isbnClean),
-    getPriceRenaudBray(isbnClean),
-    getPriceLesLibraires(isbnClean)
+    getPriceGoogleBooks(isbnClean),
+    getRenaudBrayHtml(isbnClean)
   ]);
 
   const bookInfo = isbndb || openLib;
@@ -166,13 +163,11 @@ module.exports = async (req, res) => {
     return res.status(404).json({ error: 'Livre non trouve', isbn: isbnClean });
   }
 
-  // Use Canadian price (Renaud-Bray first, then leslibraires.ca)
-  const canadianPrice = priceRB || priceLL || null;
-  bookInfo.price = canadianPrice;
-  if (canadianPrice) {
-    bookInfo.priceSource = priceRB ? 'Renaud-Bray' : 'leslibraires.ca';
-  }
+  const priceRB = rbResult.html ? extractPriceFromHtml(rbResult.html) : null;
+  const price = priceRB || priceGB || null;
+  bookInfo.price = price;
+  bookInfo.priceSource = priceRB ? 'Renaud-Bray' : (priceGB ? 'Google Books CA' : null);
 
-  console.log(`Trouve via ${bookInfo.source}: ${bookInfo.title}, prix CAD: ${canadianPrice}`);
+  console.log(`${bookInfo.title} — prix: ${price} (${bookInfo.priceSource})`);
   return res.status(200).json(bookInfo);
 };
