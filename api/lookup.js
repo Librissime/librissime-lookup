@@ -138,14 +138,6 @@ async function getPrice(isbn) {
   return { price: null, priceSource: null };
 }
 
-function estNouveaute(year) {
-  if (!year) return false;
-  const currentYear = new Date().getFullYear();
-  const pubYear = parseInt(year);
-  if (isNaN(pubYear)) return false;
-  return pubYear >= (currentYear - 2);
-}
-
 module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -159,13 +151,13 @@ module.exports = async (req, res) => {
   if (!isbn) return res.status(400).json({ error: 'ISBN requis' });
   const isbnClean = isbn.replace(/[-\s]/g, '');
 
-  // Mode « prix seulement » : pour récupérer le prix séparément (nouveautés, étiquetage)
+  // Endpoint « prix seulement » : appelé séparément par l'application, après l'affichage des infos.
   if (prixonly === '1') {
     const p = await getPrice(isbnClean);
     return res.status(200).json(p);
   }
 
-  // Modes debug
+  // Mode debug
   if (debug === 'prix') {
     try {
       const r = await fetchUrl(`https://www.leslibraires.ca/livres/${isbnClean}`);
@@ -174,24 +166,14 @@ module.exports = async (req, res) => {
     } catch(e) { return res.status(200).json({ erreur: e.message }); }
   }
 
-  // 1. Infos du livre (ISBNdb rapide, Open Library en secours) — EN PREMIER
+  // Réponse principale : INFOS DU LIVRE seulement, sans le prix → toujours rapide.
+  // Le prix est récupéré séparément par l'application via &prixonly=1.
   let bookInfo = await searchISBNdb(isbnClean);
   if (!bookInfo) bookInfo = await searchOpenLibrary(isbnClean);
   if (!bookInfo) {
     return res.status(404).json({ error: 'Livre non trouve', isbn: isbnClean });
   }
-
-  // 2. Le prix n'est attendu QUE si c'est une nouveauté (il sert alors au calcul de l'offre).
-  //    Pour les autres livres, on répond tout de suite — le prix sera cherché séparément
-  //    au moment de l'étiquetage via &prixonly=1.
-  if (estNouveaute(bookInfo.year)) {
-    const p = await getPrice(isbnClean);
-    bookInfo.price = p.price;
-    bookInfo.priceSource = p.priceSource;
-  } else {
-    bookInfo.price = null;
-    bookInfo.priceSource = null;
-  }
-
+  bookInfo.price = null;
+  bookInfo.priceSource = null;
   return res.status(200).json(bookInfo);
 };
